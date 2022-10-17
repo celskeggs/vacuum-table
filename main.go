@@ -205,7 +205,7 @@ func DownloadAttachments(attachments []Attachment, downloadDir string, client *h
 			}
 			_, _ = fmt.Fprintf(
 				os.Stderr, "%d/%d: Downloaded %q to %q (%d bytes)\n",
-				i, len(attachments), attachment.Link, downloadFilename, attachment.Size,
+				i+1, len(attachments), attachment.Link, downloadFilename, attachment.Size,
 			)
 		} else if fi.Size() != attachment.Size {
 			return fmt.Errorf("invalid size for already-downloaded attachment %q: %d instead of %d",
