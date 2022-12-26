@@ -17,7 +17,10 @@ import (
 	"github.com/hashicorp/go-multierror"
 )
 
-const AttachmentLinkPrefix = "https://dl.airtable.com/.attachments/"
+const AttachmentLinkPrefix = "https://v5.airtableusercontent.com/"
+
+// This JS command is useful for scraping the list of tables in an AirTable base:
+// "console.log(JSON.stringify(Array.from(document.getElementsByClassName("tableId")).map(function(x) { return x.textContent; })))"
 
 type Config struct {
 	api.Config
@@ -39,6 +42,7 @@ func loadConfig(path string) (Config, error) {
 }
 
 type Backup struct {
+	Config      map[string][]string     `json:"config"`
 	Tables      map[string][]api.Record `json:"tables"`
 	Attachments []Attachment            `json:"attachments"`
 }
@@ -98,7 +102,36 @@ func ExtractAllTables(config Config, client *http.Client) (map[string][]api.Reco
 
 type Attachment struct {
 	Link string `json:"link"`
+	Id   string `json:"id"`
 	Size int64  `json:"size"`
+}
+
+func ExtractAttachment(itemMap map[string]interface{}) (found bool, attachment Attachment) {
+	if url, found := itemMap["url"]; found {
+		urlStr := url.(string)
+		if !strings.HasPrefix(urlStr, AttachmentLinkPrefix) {
+			panic(fmt.Sprintf(
+				"unexpected string prefix when scanning for attachment links; string=%q prefix=%q",
+				urlStr,
+				AttachmentLinkPrefix,
+			))
+		}
+		// This ID is used as a filename, so it had better not be anything odd.
+		idStr := itemMap["id"].(string)
+		if !api.IsAirTableId(idStr) || !strings.HasPrefix(idStr, "att") {
+			panic("invalid attachment ID")
+		}
+		size := itemMap["size"].(float64)
+		if size != float64(int64(size)) {
+			panic("invalid size")
+		}
+		return true, Attachment{
+			Link: urlStr,
+			Id:   idStr,
+			Size: int64(size),
+		}
+	}
+	return false, Attachment{}
 }
 
 func ExtractAttachments(tables map[string][]api.Record) (attachments []Attachment) {
@@ -108,19 +141,9 @@ func ExtractAttachments(tables map[string][]api.Record) (attachments []Attachmen
 				if contents, ok := value.([]interface{}); ok {
 					for _, item := range contents {
 						if itemMap, okMap := item.(map[string]interface{}); okMap {
-							if url, found := itemMap["url"]; found {
-								urlStr := url.(string)
-								if !strings.HasPrefix(urlStr, AttachmentLinkPrefix) {
-									panic("unexpected string prefix when scanning for attachment links")
-								}
-								size := itemMap["size"].(float64)
-								if size != float64(int64(size)) {
-									panic("invalid size")
-								}
-								attachments = append(attachments, Attachment{
-									Link: urlStr,
-									Size: int64(size),
-								})
+							found, attachment := ExtractAttachment(itemMap)
+							if found {
+								attachments = append(attachments, attachment)
 							}
 						}
 					}
@@ -129,16 +152,6 @@ func ExtractAttachments(tables map[string][]api.Record) (attachments []Attachmen
 		}
 	}
 	return attachments
-}
-
-func AttachmentFilename(link string) string {
-	if !strings.HasPrefix(link, AttachmentLinkPrefix) {
-		panic("invalid prefix for attachment link")
-	}
-	link = link[len(AttachmentLinkPrefix):]
-	link = strings.ReplaceAll(link, "_", "__")
-	link = strings.ReplaceAll(link, "/", "_")
-	return link
 }
 
 func DownloadAttachment(attachment Attachment, outputDir, outputFilename string, client *http.Client) (errOut error) {
@@ -194,10 +207,14 @@ func DownloadAttachments(attachments []Attachment, downloadDir string, client *h
 		return errors.New("download directory is not a directory")
 	}
 	sort.Slice(attachments, func(i, j int) bool {
-		return attachments[i].Link < attachments[j].Link
+		return attachments[i].Id < attachments[j].Id
 	})
 	for i, attachment := range attachments {
-		downloadFilename := AttachmentFilename(attachment.Link)
+		downloadFilename := attachment.Id
+		// Make sure it's safe to use as a filename
+		if !api.IsAirTableId(downloadFilename) {
+			panic("invalid attachment ID format; should have been checked earlier")
+		}
 		fi, err := os.Stat(path.Join(downloadDir, downloadFilename))
 		if err != nil && os.IsNotExist(err) {
 			if err := DownloadAttachment(attachment, downloadDir, downloadFilename, client); err != nil {
@@ -207,6 +224,8 @@ func DownloadAttachments(attachments []Attachment, downloadDir string, client *h
 				os.Stderr, "%d/%d: Downloaded %q to %q (%d bytes)\n",
 				i+1, len(attachments), attachment.Link, downloadFilename, attachment.Size,
 			)
+		} else if err != nil {
+			return err
 		} else if fi.Size() != attachment.Size {
 			return fmt.Errorf("invalid size for already-downloaded attachment %q: %d instead of %d",
 				attachment.Link, fi.Size(), attachment.Size)
@@ -226,6 +245,7 @@ func Main(configPath, outputPath, downloadPath string) error {
 		return err
 	}
 	backup := Backup{
+		Config:      config.Tables,
 		Tables:      tables,
 		Attachments: ExtractAttachments(tables),
 	}
